@@ -1,0 +1,140 @@
+name: Rust CLI CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  release:
+    types: [created]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --all-features
+
+  build-windows:
+    needs: test
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        target: 
+          - x86_64-pc-windows-msvc
+          - x86_64-pc-windows-gnu
+          - i686-pc-windows-msvc
+    outputs:
+      version: ${{ steps.get_version.outputs.version }}
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    
+    - name: Get Version
+      id: get_version
+      run: |
+        $version = (cargo metadata --format-version 1 | ConvertFrom-Json).packages[0].version
+        echo "version=$version" >> $env:GITHUB_OUTPUT
+        echo "VERSION: $version"
+    
+    - name: Setup Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: stable
+        targets: ${{ matrix.target }}
+    
+    - name: Install GNU toolchain (if needed)
+      if: contains(matrix.target, 'gnu')
+      run: |
+        choco install mingw -y
+        echo "C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin" >> $env:GITHUB_PATH
+    
+    - name: Build Release
+      run: |
+        cargo build --release --target ${{ matrix.target }}
+        echo "Build completed for ${{ matrix.target }}"
+    
+    - name: Run tests on Windows
+      run: cargo test --target ${{ matrix.target }}
+    
+    - name: Strip debug symbols (optional)
+      run: |
+        cd target/${{ matrix.target }}/release
+        Get-ChildItem *.exe | ForEach-Object {
+          echo "Stripping $($_.Name)"
+          strip $_.Name 2>$null || echo "Strip not available, continuing..."
+        }
+    
+    - name: Package executable with config
+      run: |
+        $target = "${{ matrix.target }}"
+        $version = "${{ steps.get_version.outputs.version }}"
+        $exeName = (Get-ChildItem -Path "target/$target/release/*.exe" | Select-Object -First 1).Name
+        
+        # 创建发布目录
+        New-Item -ItemType Directory -Path "release-package" -Force
+        
+        # 复制可执行文件
+        Copy-Item "target/$target/release/$exeName" "release-package/$exeName"
+        
+        # 如果有配置文件，一并复制
+        if (Test-Path "config.example.toml") {
+          Copy-Item "config.example.toml" "release-package/"
+        }
+        
+        # 复制 README 或文档
+        if (Test-Path "README.md") {
+          Copy-Item "README.md" "release-package/"
+        }
+        
+        # 创建压缩包
+        $zipName = "cli-$target-$version.zip"
+        Compress-Archive -Path "release-package/*" -DestinationPath $zipName
+        
+        echo "Created package: $zipName"
+    
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: cli-${{ matrix.target }}-${{ steps.get_version.outputs.version }}
+        path: |
+          target/${{ matrix.target }}/release/*.exe
+          *.zip
+        retention-days: 7
+
+  release:
+    needs: [test, build-windows]
+    if: github.event_name == 'release' && github.event.action == 'created'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts
+    
+    - name: Create Release Bundle
+      run: |
+        mkdir -p release-bundle
+        find artifacts -name "*.exe" -exec cp {} release-bundle/ \;
+        find artifacts -name "*.zip" -exec cp {} release-bundle/ \;
+        
+        # 创建 SHA256 校验和
+        cd release-bundle
+        shopt -s nullglob
+        for file in *.exe *.zip; do
+          sha256sum "$file" > "$file.sha256"
+        done
+        
+        echo "Release files:"
+        ls -la
+    
+    - name: Upload to Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: release-bundle/*
