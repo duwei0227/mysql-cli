@@ -1,0 +1,10 @@
+[target.x86_64-unknown-linux-gnu]
+linker = "x86_64-linux-gnu-gcc"
+rustflags = [
+  "-C", "link-arg=-static",
+  "-C", "target-feature=+crt-static"
+]
+
+# 如果使用 musl
+[target.x86_64-unknown-linux-musl]
+rustflags = ["-C", "link-arg=-static"]
