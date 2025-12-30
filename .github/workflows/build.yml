@@ -1,206 +1,62 @@
-name: Rust CLI Multi-Platform CI/CD
+name: Simple Rust CLI Build
 
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
-  release:
-    types: [created]
-  workflow_dispatch:
-
-env:
-  CARGO_TERM_COLOR: always
 
 jobs:
-  test:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc
+      - run: cargo build --release --target x86_64-pc-windows-msvc
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-cli
+          path: target/x86_64-pc-windows-msvc/release/*.exe
+
+  build-linux:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --all-features
-
-  build-windows:
-    needs: test
-    runs-on: windows-latest
-    strategy:
-      matrix:
-        target: 
-          - x86_64-pc-windows-msvc
-          - x86_64-pc-windows-gnu
-          - i686-pc-windows-msvc
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
-          targets: ${{ matrix.target }}
-
-      - name: Install GNU toolchain
-        if: contains(matrix.target, 'gnu')
-        run: |
-          choco install mingw -y
-          echo "C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin" >> $env:GITHUB_PATH
-
-      - name: Cache dependencies
-        uses: actions/cache@v4
+      - run: |
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --release --target x86_64-unknown-linux-musl
+      - uses: actions/upload-artifact@v4
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: windows-${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Build Release
-        run: cargo build --release --target ${{ matrix.target }}
-
-      - name: Upload Windows artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/*.exe
-          retention-days: 14
-
+          name: linux-cli
+          path: target/x86_64-unknown-linux-musl/release/*
+   # CentOS 7 构建（使用 musl 静态链接）
   build-centos7:
-    needs: test
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Rust for cross-compilation
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
-          targets: x86_64-unknown-linux-musl
-
-      - name: Cache dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: centos-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Build static binary with musl
+      - name: Build with musl (static linking)
         run: |
           rustup target add x86_64-unknown-linux-musl
           cargo build --release --target x86_64-unknown-linux-musl
           
           # 复制二进制文件
-          for file in target/x86_64-unknown-linux-musl/release/*; do
-            if [ -f "$file" ] && [ -x "$file" ] && [[ ! "$file" =~ \.so$ ]]; then
-              cp "$file" my-cli-centos7
+          for binary in target/x86_64-unknown-linux-musl/release/*; do
+            if [ -f "$binary" ] && [ -x "$binary" ]; then
+              cp "$binary" myapp-centos7
+              echo "Binary copied: $binary"
               break
             fi
           done
-
-      - name: Create CentOS 7 package
-        run: |
-          # 创建发布目录结构
-          mkdir -p centos-package/usr/local/bin
-          
-          if [ -f "my-cli-centos7" ]; then
-            chmod +x my-cli-centos7
-            cp my-cli-centos7 centos-package/usr/local/bin/
-            
-            # 创建简单的安装脚本
-            cat << 'EOF' > centos-package/install.sh
-#!/bin/bash
-set -e
-echo "Installing My CLI Tool..."
-cp usr/local/bin/my-cli-centos7 /usr/local/bin/my-cli 2>/dev/null || true
-chmod +x /usr/local/bin/my-cli 2>/dev/null
-echo "Installation complete! Run: my-cli --help"
-EOF
-            
-            chmod +x centos-package/install.sh
-            
-            # 创建压缩包
-            tar -czf my-cli-centos7.tar.gz -C centos-package .
-            
-            echo "Created CentOS 7 package"
-            ls -la my-cli-centos7*
-          else
-            echo "Error: No binary found for CentOS 7"
-            exit 1
-          fi
-
-      - name: Upload CentOS 7 artifacts
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: centos7-cli
           path: |
-            my-cli-centos7
-            my-cli-centos7.tar.gz
-          retention-days: 14
-
-  release:
-    needs: [test, build-windows, build-centos7]
-    if: github.event_name == 'release' && github.event.action == 'created'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Prepare release assets
-        run: |
-          mkdir -p release-assets
-          
-          # 收集所有文件
-          find artifacts -type f \( -name "*.exe" -o -name "*.tar.gz" -o -name "my-cli-centos7" \) -exec cp {} release-assets/ \;
-          
-          # 创建校验和
-          cd release-assets
-          echo "# SHA256 Checksums" > CHECKSUMS.txt
-          echo "Generated: $(date -u)" >> CHECKSUMS.txt
-          echo "" >> CHECKSUMS.txt
-          
-          for file in *; do
-            if [ -f "$file" ] && [ "$file" != "CHECKSUMS.txt" ]; then
-              sha256sum "$file" >> CHECKSUMS.txt
-            fi
-          done
-          
-          echo "Release assets prepared"
-          ls -la
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
-        with:
-          files: release-assets/*
-          name: Release ${{ github.ref_name }}
-          body: |
-            Multi-platform CLI release
-            
-            ### Downloads
-            - Windows: .exe files for various targets
-            - CentOS 7: Static binary and tarball
-            
-            ### Installation
-            
-            **Windows:**
-            - Download the .exe file and run from command prompt
-            
-            **CentOS 7:**
-            ```
-            tar -xzf my-cli-centos7.tar.gz
-            cd centos-package
-            sudo ./install.sh
-            ```
-            
-            ### Verification
-            See CHECKSUMS.txt for SHA256 checksums
-          draft: false
-          prerelease: false
+            myapp-centos7
+            target/x86_64-unknown-linux-musl/release/*
