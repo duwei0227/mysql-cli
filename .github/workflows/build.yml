@@ -11,7 +11,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
 
 jobs:
   test:
@@ -30,206 +29,117 @@ jobs:
           - x86_64-pc-windows-msvc
           - x86_64-pc-windows-gnu
           - i686-pc-windows-msvc
-    
+
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-    
-    - name: Get Version
-      id: get_version
-      run: |
-        $version = (cargo metadata --format-version 1 | ConvertFrom-Json).packages[0].version
-        echo "version=$version" >> $env:GITHUB_OUTPUT
-    
-    - name: Setup Rust
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        toolchain: stable
-        targets: ${{ matrix.target }}
-    
-    - name: Install GNU toolchain
-      if: contains(matrix.target, 'gnu')
-      run: |
-        choco install mingw -y
-        echo "C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin" >> $env:GITHUB_PATH
-    
-    - name: Cache dependencies
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: windows-${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-    
-    - name: Build Release
-      run: cargo build --release --target ${{ matrix.target }}
-    
-    - name: Strip debug symbols
-      run: |
-        cd target/${{ matrix.target }}/release
-        Get-ChildItem *.exe | ForEach-Object {
-          strip $_.Name 2>$null || echo "Strip not available, continuing..."
-        }
-    
-    - name: Create Windows package
-      run: |
-        $target = "${{ matrix.target }}"
-        $version = "${{ steps.get_version.outputs.version }}"
-        $exeName = (Get-ChildItem -Path "target/$target/release/*.exe" | Select-Object -First 1).Name
-        $baseName = $exeName -replace '\.exe$', ''
-        
-        New-Item -ItemType Directory -Path "windows-package" -Force
-        Copy-Item "target/$target/release/$exeName" "windows-package/"
-        
-        # 创建批处理脚本 - 使用单引号避免转义问题
-        "@echo off
-        echo %cd%
-        $baseName.exe --help
-        pause" | Out-File -FilePath "windows-package/run-example.bat" -Encoding ASCII
-        
-        $zipName = "$baseName-windows-$target-$version.zip"
-        Compress-Archive -Path "windows-package/*" -DestinationPath $zipName
-        echo "Created package: $zipName"
-    
-    - name: Upload Windows artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: windows-${{ matrix.target }}-${{ steps.get_version.outputs.version }}
-        path: |
-          target/${{ matrix.target }}/release/*.exe
-          *.zip
-        retention-days: 14
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - name: Install GNU toolchain
+        if: contains(matrix.target, 'gnu')
+        run: |
+          choco install mingw -y
+          echo "C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin" >> $env:GITHUB_PATH
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build Release
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/*.exe
+          retention-days: 14
 
   build-centos7:
     needs: test
     runs-on: ubuntu-latest
-    
+
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-    
-    - name: Get Version
-      id: get_version
-      run: |
-        echo "version=$(cargo metadata --format-version 1 | jq -r '.packages[0].version')" >> $GITHUB_OUTPUT
-    
-    - name: Setup Rust for cross-compilation
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        toolchain: stable
-        targets: x86_64-unknown-linux-gnu
-    
-    - name: Cache dependencies
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: centos-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-    
-    - name: Build static binary with musl
-      run: |
-        rustup target add x86_64-unknown-linux-musl
-        cargo build --release --target x86_64-unknown-linux-musl
-        
-        # 检查文件
-        file target/x86_64-unknown-linux-musl/release/*
-        echo "Static binary built with musl"
-    
-    - name: Build with glibc compatibility
-      run: |
-        # 安装交叉编译工具
-        sudo apt-get update
-        sudo apt-get install -y gcc-x86-64-linux-gnu
-        
-        # 构建动态链接版本
-        export CC_x86_64_unknown_linux_gnu=x86_64-linux-gnu-gcc
-        export CXX_x86_64_unknown_linux_gnu=x86_64-linux-gnu-g++
-        cargo build --release --target x86_64-unknown-linux-gnu
-        
-        # 检查 glibc 版本要求
-        echo "Checking glibc requirements:"
-        for binary in target/x86_64-unknown-linux-gnu/release/*; do
-          if [ -f "$binary" ] && [ -x "$binary" ]; then
-            echo "=== $binary ==="
-            objdump -T "$binary" 2>/dev/null | grep "GLIBC_" | sort -u | tail -5 || true
-          fi
-        done
-    
-    - name: Create CentOS 7 package
-      run: |
-        version="${{ steps.get_version.outputs.version }}"
-        
-        # 优先使用 musl 静态二进制
-        if [ -f "target/x86_64-unknown-linux-musl/release/*" ]; then
-          find target/x86_64-unknown-linux-musl/release -type f -executable ! -name "*.so" -exec cp {} my-cli-centos7 \;
-        elif [ -f "target/x86_64-unknown-linux-gnu/release/*" ]; then
-          find target/x86_64-unknown-linux-gnu/release -type f -executable ! -name "*.so" -exec cp {} my-cli-centos7 \;
-        fi
-        
-        if [ -f "my-cli-centos7" ]; then
-          chmod +x my-cli-centos7
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust for cross-compilation
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-musl
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: centos-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build static binary with musl
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --release --target x86_64-unknown-linux-musl
           
+          # 复制二进制文件
+          for file in target/x86_64-unknown-linux-musl/release/*; do
+            if [ -f "$file" ] && [ -x "$file" ] && [[ ! "$file" =~ \.so$ ]]; then
+              cp "$file" my-cli-centos7
+              break
+            fi
+          done
+
+      - name: Create CentOS 7 package
+        run: |
           # 创建发布目录结构
           mkdir -p centos-package/usr/local/bin
-          mkdir -p centos-package/etc/my-cli
           
-          cp my-cli-centos7 centos-package/usr/local/bin/
-          
-          # 创建简单的安装脚本
-          cat > centos-package/install.sh << 'EOF'
+          if [ -f "my-cli-centos7" ]; then
+            chmod +x my-cli-centos7
+            cp my-cli-centos7 centos-package/usr/local/bin/
+            
+            # 创建简单的安装脚本
+            cat << 'EOF' > centos-package/install.sh
 #!/bin/bash
 set -e
-
 echo "Installing My CLI Tool..."
-cp usr/local/bin/my-cli-centos7 /usr/local/bin/my-cli 2>/dev/null || cp usr/local/bin/* /usr/local/bin/ 2>/dev/null
+cp usr/local/bin/my-cli-centos7 /usr/local/bin/my-cli 2>/dev/null || true
 chmod +x /usr/local/bin/my-cli 2>/dev/null
 echo "Installation complete! Run: my-cli --help"
 EOF
-          
-          chmod +x centos-package/install.sh
-          
-          # 创建 README
-          cat > centos-package/README.txt << 'EOF'
-My CLI Tool for CentOS 7
-========================
+            
+            chmod +x centos-package/install.sh
+            
+            # 创建压缩包
+            tar -czf my-cli-centos7.tar.gz -C centos-package .
+            
+            echo "Created CentOS 7 package"
+            ls -la my-cli-centos7*
+          else
+            echo "Error: No binary found for CentOS 7"
+            exit 1
+          fi
 
-Installation:
-1. Extract this archive: tar -xzf my-cli-centos7-*.tar.gz
-2. cd centos-package
-3. sudo ./install.sh
-
-Or manually:
-sudo cp usr/local/bin/my-cli-centos7 /usr/local/bin/my-cli
-sudo chmod +x /usr/local/bin/my-cli
-EOF
-          
-          # 创建压缩包
-          tar -czf my-cli-centos7-$version.tar.gz -C centos-package .
-          
-          echo "Created CentOS 7 package: my-cli-centos7-$version.tar.gz"
-          ls -la my-cli-centos7*
-        else
-          echo "Warning: No binary found for CentOS 7"
-          # 创建一个空的tar包避免失败
-          mkdir -p empty-package
-          echo "Build failed - no binary produced" > empty-package/ERROR.txt
-          tar -czf my-cli-centos7-$version.tar.gz -C empty-package .
-        fi
-    
-    - name: Upload CentOS 7 artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: centos7-${{ steps.get_version.outputs.version }}
-        path: |
-          my-cli-centos7
-          *.tar.gz
-          target/x86_64-unknown-linux-gnu/release/*
-          target/x86_64-unknown-linux-musl/release/*
-        if-no-files-found: warn
-        retention-days: 14
+      - name: Upload CentOS 7 artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: centos7-cli
+          path: |
+            my-cli-centos7
+            my-cli-centos7.tar.gz
+          retention-days: 14
 
   release:
     needs: [test, build-windows, build-centos7]
@@ -237,46 +147,60 @@ EOF
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    
+
     steps:
-    - name: Download all artifacts
-      uses: actions/download-artifact@v4
-      with:
-        path: artifacts
-    
-    - name: Prepare release assets
-      run: |
-        mkdir -p release-assets
-        
-        # 收集所有文件
-        find artifacts -type f \( -name "*.exe" -o -name "*.zip" -o -name "*.tar.gz" -o -name "my-cli-centos7" \) -exec cp {} release-assets/ \;
-        
-        # 创建校验和
-        cd release-assets
-        echo "# SHA256 Checksums" > CHECKSUMS.txt
-        echo "Generated: $(date -u)" >> CHECKSUMS.txt
-        echo "" >> CHECKSUMS.txt
-        
-        for file in *; do
-          if [ -f "$file" ]; then
-            sha256sum "$file" >> CHECKSUMS.txt
-          fi
-        done
-        
-        # 创建安装说明
-        cat > INSTALL.md << 'EOF'
-# Installation Guide
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
 
-## Windows
-Download the .exe file and run from command prompt.
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+          
+          # 收集所有文件
+          find artifacts -type f \( -name "*.exe" -o -name "*.tar.gz" -o -name "my-cli-centos7" \) -exec cp {} release-assets/ \;
+          
+          # 创建校验和
+          cd release-assets
+          echo "# SHA256 Checksums" > CHECKSUMS.txt
+          echo "Generated: $(date -u)" >> CHECKSUMS.txt
+          echo "" >> CHECKSUMS.txt
+          
+          for file in *; do
+            if [ -f "$file" ] && [ "$file" != "CHECKSUMS.txt" ]; then
+              sha256sum "$file" >> CHECKSUMS.txt
+            fi
+          done
+          
+          echo "Release assets prepared"
+          ls -la
 
-## CentOS 7
-```bash
-# Method 1: Using the tarball
-tar -xzf my-cli-centos7-*.tar.gz
-cd centos-package
-sudo ./install.sh
-
-# Method 2: Manual install
-chmod +x my-cli-centos7
-sudo cp my-cli-centos7 /usr/local/bin/my-cli
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: release-assets/*
+          name: Release ${{ github.ref_name }}
+          body: |
+            Multi-platform CLI release
+            
+            ### Downloads
+            - Windows: .exe files for various targets
+            - CentOS 7: Static binary and tarball
+            
+            ### Installation
+            
+            **Windows:**
+            - Download the .exe file and run from command prompt
+            
+            **CentOS 7:**
+            ```
+            tar -xzf my-cli-centos7.tar.gz
+            cd centos-package
+            sudo ./install.sh
+            ```
+            
+            ### Verification
+            See CHECKSUMS.txt for SHA256 checksums
+          draft: false
+          prerelease: false
