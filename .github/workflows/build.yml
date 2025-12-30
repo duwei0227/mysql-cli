@@ -1,62 +1,53 @@
-name: Simple Rust CLI Build
+name: Build with Cargo Config
 
 on:
   push:
     branches: [main]
 
 jobs:
-  build-windows:
-    runs-on: windows-latest
+  build:
+    strategy:
+      matrix:
+        target: 
+          - x86_64-pc-windows-msvc
+          - x86_64-unknown-linux-musl
+        include:
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            artifact_name: windows.exe
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            artifact_name: linux-musl
+    
+    runs-on: ${{ matrix.os }}
+    
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
-          targets: x86_64-pc-windows-msvc
-      - run: cargo build --release --target x86_64-pc-windows-msvc
-      - uses: actions/upload-artifact@v4
-        with:
-          name: windows-cli
-          path: target/x86_64-pc-windows-msvc/release/*.exe
-
-  build-linux:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
-      - run: |
-          rustup target add x86_64-unknown-linux-musl
-          cargo build --release --target x86_64-unknown-linux-musl
-      - uses: actions/upload-artifact@v4
-        with:
-          name: linux-cli
-          path: target/x86_64-unknown-linux-musl/release/*
-   # CentOS 7 构建（使用 musl 静态链接）
-  build-centos7:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
-      - name: Build with musl (static linking)
+          targets: ${{ matrix.target }}
+      
+      - name: Add musl target
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: rustup target add x86_64-unknown-linux-musl
+      
+      - name: Build with optimizations
         run: |
-          rustup target add x86_64-unknown-linux-musl
-          cargo build --release --target x86_64-unknown-linux-musl
+          echo "Building for ${{ matrix.target }}..."
+          cargo build --release --target ${{ matrix.target }}
           
-          # 复制二进制文件
-          for binary in target/x86_64-unknown-linux-musl/release/*; do
-            if [ -f "$binary" ] && [ -x "$binary" ]; then
-              cp "$binary" myapp-centos7
-              echo "Binary copied: $binary"
-              break
-            fi
-          done
-      - uses: actions/upload-artifact@v4
+          echo "=== Binary size ==="
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            ls -lh target/${{ matrix.target }}/release/*.exe
+          else
+            ls -lh target/${{ matrix.target }}/release/*
+          fi
+      
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
-          name: centos7-cli
-          path: |
-            myapp-centos7
-            target/x86_64-unknown-linux-musl/release/*
+          name: ${{ matrix.artifact_name }}
+          path: target/${{ matrix.target }}/release/*
