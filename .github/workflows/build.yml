@@ -1,53 +1,35 @@
-name: Build with Cargo Config
+name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [ "main" ]
 
 jobs:
   build:
-    strategy:
-      matrix:
-        target: 
-          - x86_64-pc-windows-msvc
-          - x86_64-unknown-linux-musl
-        include:
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            artifact_name: windows.exe
-          - target: x86_64-unknown-linux-musl
-            os: ubuntu-latest
-            artifact_name: linux-musl
-    
-    runs-on: ${{ matrix.os }}
-    
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
-          targets: ${{ matrix.target }}
-      
-      - name: Add musl target
-        if: matrix.target == 'x86_64-unknown-linux-musl'
-        run: rustup target add x86_64-unknown-linux-musl
-      
-      - name: Build with optimizations
+
+      # 安装 Rust 并添加 musl 目标
+      - name: Set up Rust
         run: |
-          echo "Building for ${{ matrix.target }}..."
-          cargo build --release --target ${{ matrix.target }}
-          
-          echo "=== Binary size ==="
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            ls -lh target/${{ matrix.target }}/release/*.exe
-          else
-            ls -lh target/${{ matrix.target }}/release/*
-          fi
-      
-      - name: Upload artifact
+          rustup default stable
+          rustup target add x86_64-unknown-linux-musl
+
+      # 可选：安装 musl 工具链依赖（使静态链接顺利）
+      - name: Install musl tools
+        run: |
+          sudo apt update
+          sudo apt install -y musl-tools
+
+      # 静态编译
+      - name: Build release binary
+        run: |
+          cargo build --release --target x86_64-unknown-linux-musl
+
+      # 输出可执行文件
+      - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact_name }}
-          path: target/${{ matrix.target }}/release/*
+          name: mysql-cli
+          path: target/x86_64-unknown-linux-musl/release/mysql-cli
